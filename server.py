@@ -17,6 +17,7 @@ from pathlib import Path
 import httpx
 import asyncio
 import json
+from datetime import datetime, timezone
 from playwright.async_api import async_playwright, Page
 from playwright_stealth import Stealth
 # Load environment variables
@@ -1930,6 +1931,381 @@ def read_notebook(
         return "\n".join(blocks)
     except Exception as e:
         return f"Error reading notebook: {str(e)}"
+
+# =========================
+# Crypto Price Monitor
+# =========================
+
+COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+
+COIN_ALIASES = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "bnb": "binancecoin",
+    "sol": "solana",
+    "xrp": "ripple",
+    "ada": "cardano",
+    "doge": "dogecoin",
+    "dot": "polkadot",
+    "matic": "matic-network",
+    "link": "chainlink",
+    "avax": "avalanche-2",
+    "uni": "uniswap",
+    "ltc": "litecoin",
+    "atom": "cosmos",
+    "near": "near",
+    "apt": "aptos",
+    "arb": "arbitrum",
+    "op": "optimism",
+    "idr": "rupiah-token",
+    "usdt": "tether",
+    "usdc": "usd-coin",
+    "dai": "dai",
+}
+
+def resolve_coin_id(coin: str) -> str:
+    """Resolve nama/simbol coin ke CoinGecko ID."""
+    coin_lower = coin.lower().strip()
+    return COIN_ALIASES.get(coin_lower, coin_lower)
+
+
+@mcp.tool()
+async def get_price(
+    coins: str,
+    currencies: str = "usd,idr",
+) -> dict:
+    """
+    Dapatkan harga crypto saat ini.
+
+    Args:
+        coins: Nama atau simbol koin, pisahkan dengan koma (contoh: "bitcoin,ethereum" atau "btc,eth,sol")
+        currencies: Mata uang target, pisahkan dengan koma (contoh: "usd,idr"). Default: usd,idr
+
+    Returns:
+        Harga koin dalam mata uang yang diminta
+    """
+    coin_list = [resolve_coin_id(c.strip()) for c in coins.split(",")]
+    coin_ids = ",".join(coin_list)
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/simple/price",
+            params={
+                "ids": coin_ids,
+                "vs_currencies": currencies,
+                "include_24hr_change": "true",
+                "include_market_cap": "true",
+                "include_last_updated_at": "true",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    result = {}
+    for coin_id, prices in data.items():
+        result[coin_id] = {}
+        for key, value in prices.items():
+            if key.endswith("_24h_change"):
+                currency = key.replace("_24h_change", "")
+                if currency not in result[coin_id]:
+                    result[coin_id][currency] = {}
+                result[coin_id][currency]["change_24h_pct"] = round(value, 2) if value else None
+            elif key.endswith("_market_cap"):
+                currency = key.replace("_market_cap", "")
+                if currency not in result[coin_id]:
+                    result[coin_id][currency] = {}
+                result[coin_id][currency]["market_cap"] = value
+            elif key == "last_updated_at":
+                result[coin_id]["last_updated_at"] = value
+            else:
+                if key not in result[coin_id]:
+                    result[coin_id][key] = {}
+                result[coin_id][key]["price"] = value
+
+    return result
+
+
+@mcp.tool()
+async def get_coin_detail(coin: str) -> dict:
+    """
+    Dapatkan detail lengkap sebuah koin termasuk info pasar, ATH, ATL, dll.
+
+    Args:
+        coin: Nama atau simbol koin (contoh: "bitcoin" atau "btc")
+
+    Returns:
+        Detail lengkap koin
+    """
+    coin_id = resolve_coin_id(coin)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/coins/{coin_id}",
+            params={
+                "localization": "false",
+                "tickers": "false",
+                "market_data": "true",
+                "community_data": "false",
+                "developer_data": "false",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    market = data.get("market_data", {})
+    return {
+        "id": data.get("id"),
+        "symbol": data.get("symbol", "").upper(),
+        "name": data.get("name"),
+        "description": (data.get("description", {}).get("en", "") or "")[:300],
+        "market_cap_rank": data.get("market_cap_rank"),
+        "price": {
+            "usd": market.get("current_price", {}).get("usd"),
+            "idr": market.get("current_price", {}).get("idr"),
+            "btc": market.get("current_price", {}).get("btc"),
+        },
+        "price_change_24h": {
+            "usd_pct": round(market.get("price_change_percentage_24h") or 0, 2),
+            "7d_pct": round(market.get("price_change_percentage_7d") or 0, 2),
+            "30d_pct": round(market.get("price_change_percentage_30d") or 0, 2),
+        },
+        "market_cap_usd": market.get("market_cap", {}).get("usd"),
+        "volume_24h_usd": market.get("total_volume", {}).get("usd"),
+        "circulating_supply": market.get("circulating_supply"),
+        "total_supply": market.get("total_supply"),
+        "ath": {
+            "usd": market.get("ath", {}).get("usd"),
+            "usd_date": market.get("ath_date", {}).get("usd"),
+            "change_from_ath_pct": round(market.get("ath_change_percentage", {}).get("usd") or 0, 2),
+        },
+        "atl": {
+            "usd": market.get("atl", {}).get("usd"),
+            "usd_date": market.get("atl_date", {}).get("usd"),
+        },
+        "last_updated": data.get("last_updated"),
+    }
+
+
+@mcp.tool()
+async def get_top_coins(limit: int = 10, currency: str = "usd") -> list[dict]:
+    """
+    Dapatkan daftar koin teratas berdasarkan market cap.
+
+    Args:
+        limit: Jumlah koin yang ditampilkan (1-250, default: 10)
+        currency: Mata uang untuk harga (default: "usd")
+
+    Returns:
+        List koin teratas dengan harga dan data pasar
+    """
+    limit = max(1, min(250, limit))
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/coins/markets",
+            params={
+                "vs_currency": currency,
+                "order": "market_cap_desc",
+                "per_page": limit,
+                "page": 1,
+                "sparkline": "false",
+                "price_change_percentage": "24h,7d",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return [
+        {
+            "rank": coin.get("market_cap_rank"),
+            "id": coin.get("id"),
+            "symbol": (coin.get("symbol") or "").upper(),
+            "name": coin.get("name"),
+            "price": coin.get("current_price"),
+            "market_cap": coin.get("market_cap"),
+            "volume_24h": coin.get("total_volume"),
+            "change_24h_pct": round(coin.get("price_change_percentage_24h") or 0, 2),
+            "change_7d_pct": round(coin.get("price_change_percentage_7d_in_currency") or 0, 2),
+        }
+        for coin in data
+    ]
+
+
+@mcp.tool()
+async def search_coin(query: str) -> list[dict]:
+    """
+    Cari koin berdasarkan nama atau simbol.
+
+    Args:
+        query: Kata kunci pencarian (contoh: "bitcoin", "pepe", "layer2")
+
+    Returns:
+        List koin yang cocok dengan hasil pencarian
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/search",
+            params={"query": query},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    coins = data.get("coins", [])[:10]
+    return [
+        {
+            "id": c.get("id"),
+            "symbol": (c.get("symbol") or "").upper(),
+            "name": c.get("name"),
+            "market_cap_rank": c.get("market_cap_rank"),
+        }
+        for c in coins
+    ]
+
+
+@mcp.tool()
+async def get_global_market() -> dict:
+    """
+    Dapatkan data pasar crypto global (total market cap, dominasi BTC, dll).
+
+    Returns:
+        Data pasar crypto global
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(f"{COINGECKO_BASE}/global")
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+
+    return {
+        "total_market_cap_usd": data.get("total_market_cap", {}).get("usd"),
+        "total_volume_24h_usd": data.get("total_volume", {}).get("usd"),
+        "market_cap_change_24h_pct": round(data.get("market_cap_change_percentage_24h_usd") or 0, 2),
+        "btc_dominance_pct": round(data.get("market_cap_percentage", {}).get("btc") or 0, 2),
+        "eth_dominance_pct": round(data.get("market_cap_percentage", {}).get("eth") or 0, 2),
+        "active_cryptocurrencies": data.get("active_cryptocurrencies"),
+        "markets": data.get("markets"),
+        "updated_at": data.get("updated_at"),
+    }
+
+
+@mcp.tool()
+async def get_price_history(
+    coin: str,
+    days: int = 7,
+    currency: str = "usd",
+) -> dict:
+    """
+    Dapatkan riwayat harga koin dalam beberapa hari terakhir.
+
+    Args:
+        coin: Nama atau simbol koin (contoh: "bitcoin" atau "btc")
+        days: Jumlah hari ke belakang (1-365, default: 7)
+        currency: Mata uang target (default: "usd")
+
+    Returns:
+        Riwayat harga OHLC (Open, High, Low, Close)
+    """
+    coin_id = resolve_coin_id(coin)
+    days = max(1, min(365, days))
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/coins/{coin_id}/ohlc",
+            params={
+                "vs_currency": currency,
+                "days": days,
+            },
+        )
+        resp.raise_for_status()
+        ohlc_data = resp.json()
+
+    if not ohlc_data:
+        return {"coin": coin_id, "currency": currency, "days": days, "data": []}
+
+    formatted = []
+    for entry in ohlc_data:
+        ts, open_p, high_p, low_p, close_p = entry
+        dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        formatted.append({
+            "datetime": dt,
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "close": close_p,
+        })
+
+    first_close = formatted[0]["close"] if formatted else None
+    last_close = formatted[-1]["close"] if formatted else None
+    change_pct = None
+    if first_close and last_close:
+        change_pct = round(((last_close - first_close) / first_close) * 100, 2)
+
+    return {
+        "coin": coin_id,
+        "currency": currency,
+        "days": days,
+        "summary": {
+            "start_price": first_close,
+            "end_price": last_close,
+            "change_pct": change_pct,
+            "high": max(e["high"] for e in formatted),
+            "low": min(e["low"] for e in formatted),
+        },
+        "ohlc": formatted,
+    }
+
+
+@mcp.tool()
+async def compare_coins(
+    coins: str,
+    currency: str = "usd",
+) -> list[dict]:
+    """
+    Bandingkan beberapa koin secara side-by-side.
+
+    Args:
+        coins: Daftar koin dipisah koma (contoh: "btc,eth,sol,bnb")
+        currency: Mata uang untuk perbandingan (default: "usd")
+
+    Returns:
+        Perbandingan koin-koin yang diminta
+    """
+    coin_list = [resolve_coin_id(c.strip()) for c in coins.split(",")]
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(
+            f"{COINGECKO_BASE}/coins/markets",
+            params={
+                "vs_currency": currency,
+                "ids": ",".join(coin_list),
+                "order": "market_cap_desc",
+                "per_page": 50,
+                "page": 1,
+                "sparkline": "false",
+                "price_change_percentage": "24h,7d,30d",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    return [
+        {
+            "rank": coin.get("market_cap_rank"),
+            "id": coin.get("id"),
+            "symbol": (coin.get("symbol") or "").upper(),
+            "name": coin.get("name"),
+            "price": coin.get("current_price"),
+            "market_cap": coin.get("market_cap"),
+            "volume_24h": coin.get("total_volume"),
+            "change_24h_pct": round(coin.get("price_change_percentage_24h") or 0, 2),
+            "change_7d_pct": round(coin.get("price_change_percentage_7d_in_currency") or 0, 2),
+            "change_30d_pct": round(coin.get("price_change_percentage_30d_in_currency") or 0, 2),
+            "ath": coin.get("ath"),
+            "ath_change_pct": round(coin.get("ath_change_percentage") or 0, 2),
+            "circulating_supply": coin.get("circulating_supply"),
+        }
+        for coin in data
+    ]
+
 
 # Allow direct execution of the server
 if __name__ == "__main__":
