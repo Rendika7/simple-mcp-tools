@@ -36,8 +36,8 @@ This MCP server provides the following tools:
 ### Setup
 1. Clone the repository:
    ```bash
-   git clone https://github.com/algonacci/mcp-tools.git
-   cd mcp-tools
+   git clone https://github.com/Rendika7/simple-mcp-tools.git
+   cd simple-mcp-tools
    ```
 
 2. Install dependencies:
@@ -146,4 +146,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Author
 
-Eric Julianto
+Rendika7
