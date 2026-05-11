@@ -48,6 +48,15 @@ htmlcov/
 nosetests.xml
 coverage.xml
 *.cover
+
+# Environment variables
+.env
+
+# Temporary files
+temp_*.py
+temp_*.txt
+test.pdf
+test.xlsx
 *.py,cover
 .hypothesis/
 .pytest_cache/

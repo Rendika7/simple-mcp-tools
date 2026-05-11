@@ -2307,6 +2307,488 @@ async def compare_coins(
     ]
 
 
+raw_paths = os.getenv("ALLOWED_PATHS", "")
+
+ALLOWED_PATHS = [
+    Path(p.strip()).resolve() for p in raw_paths.split(";") if p.strip()
+]
+
+def is_path_allowed(path: str) -> bool:
+    try:
+        requested = Path(path).resolve()
+        return any(str(requested).startswith(str(base.resolve())) for base in ALLOWED_PATHS)
+    except:
+        return False
+
+@mcp.tool()
+def list_directory(path: str) -> dict:
+    """
+    List semua file dan folder dalam direktori tertentu (read-only).
+
+    Tool ini hanya bisa mengakses path yang sudah di-whitelist melalui ALLOWED_PATHS.
+    Gunakan ini untuk eksplorasi struktur folder sebelum membuka atau mencari file.
+
+    Args:
+        path: Path direktori yang ingin dilihat (contoh: "C:/Users/Braincore/Documents")
+
+    Returns:
+        Dictionary berisi:
+        - path: Path yang diakses
+        - items: List isi folder (name + apakah folder atau file)
+
+    Notes:
+        - Tidak bisa akses di luar whitelist
+        - Tidak membaca isi file, hanya struktur
+        - Gunakan sebelum search atau read file
+    """
+    import os
+
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    try:
+        items = []
+        for f in os.listdir(path):
+            full_path = os.path.join(path, f)
+            items.append({
+                "name": f,
+                "is_dir": os.path.isdir(full_path)
+            })
+
+        return {"path": path, "items": items}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
+@mcp.tool()
+def search_files(path: str, keyword: str) -> dict:
+    """
+    Mencari file dalam direktori berdasarkan keyword (recursive search).
+
+    Tool ini akan menelusuri semua subfolder dalam path yang diberikan
+    dan mengembalikan file yang namanya mengandung keyword.
+
+    Args:
+        path: Path root untuk pencarian (contoh: "C:/Users/Braincore/Documents")
+        keyword: Kata kunci untuk mencari nama file (contoh: "report", "mcp", ".py")
+
+    Returns:
+        Dictionary berisi:
+        - matches: List path file yang cocok (dibatasi maksimal 50 hasil)
+
+    Notes:
+        - Hanya mencari berdasarkan nama file (bukan isi file)
+        - Recursive (masuk ke semua subfolder)
+        - Output dibatasi untuk mencegah overload
+        - Path harus dalam whitelist
+    """
+    import os
+
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    results = []
+
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            if keyword.lower() in file.lower():
+                results.append(os.path.join(root, file))
+
+    return {"matches": results[:50]}  # limit biar gak overload
+
+
+
+@mcp.tool()
+def read_text_file(path: str) -> dict:
+    """
+    Membaca isi file teks dari path tertentu.
+
+    Cocok untuk membaca file seperti:
+    - .txt
+    - .py
+    - .json
+    - .csv (basic)
+    - config files
+
+    Args:
+        path: Path lengkap file (contoh: "C:/Users/.../server.py")
+
+    Returns:
+        Dictionary berisi:
+        - content: Isi file (dipotong maksimal 5000 karakter)
+
+    Notes:
+        - Hanya untuk file teks (bukan binary seperti .exe atau .jpg)
+        - Output dipotong untuk efisiensi
+        - Path harus dalam whitelist
+    """
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        return {"content": content[:5000]}  # limit size
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
+@mcp.tool()
+def get_project_tree(path: str, depth: int = 2) -> list:
+    """
+    Menampilkan struktur folder (tree view) dari sebuah direktori.
+
+    Berguna untuk memahami struktur project secara cepat tanpa membaca semua file.
+
+    Args:
+        path: Path root project (contoh: "C:/Users/.../GitHub/project")
+        depth: Kedalaman folder yang ingin ditampilkan (default: 2)
+
+    Returns:
+        List struktur folder:
+        - folder: Path folder
+        - files: List file dalam folder tersebut
+
+    Notes:
+        - Tidak recursive penuh (dibatasi depth)
+        - Cocok untuk eksplorasi awal project
+        - Path harus dalam whitelist
+    """
+    import os
+
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    tree = []
+
+    for root, dirs, files in os.walk(path):
+        level = root.replace(path, "").count(os.sep)
+        if level >= depth:
+            continue
+
+        tree.append({
+            "folder": root,
+            "files": files
+        })
+
+    return tree
+
+@mcp.tool()
+def get_file_info(path: str) -> dict:
+    """
+    Mendapatkan informasi metadata dari file atau folder.
+
+    Berguna untuk validasi sebelum membaca file atau eksplorasi struktur.
+
+    Args:
+        path: Path file atau folder (contoh: "C:/Users/.../file.py")
+
+    Returns:
+        Dictionary berisi:
+        - size: Ukuran file (bytes)
+        - modified: Waktu terakhir diubah (timestamp)
+        - is_file: True jika file
+        - is_dir: True jika folder
+
+    Notes:
+        - Tidak membaca isi file
+        - Path harus dalam whitelist (ALLOWED_PATHS)
+    """
+    import os
+
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    try:
+        stat = os.stat(path)
+        return {
+            "path": path,
+            "size": stat.st_size,
+            "modified": stat.st_mtime,
+            "is_file": os.path.isfile(path),
+            "is_dir": os.path.isdir(path),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def find_file_global(keyword: str) -> dict:
+    """
+    Mencari file di seluruh folder yang diizinkan (ALLOWED_PATHS).
+
+    Tool ini akan mencari file berdasarkan nama di semua path yang sudah di-whitelist.
+
+    Args:
+        keyword: Nama file atau sebagian nama file (contoh: "Template_Electric_Token_Tracker.xlsx")
+
+    Returns:
+        Dictionary berisi:
+        - matches: List path file yang ditemukan
+        - searched_paths: Path yang diperiksa
+
+    Notes:
+        - Recursive search di semua whitelist
+        - Maksimal 100 hasil
+    """
+    import os
+
+    results = []
+
+    for base in ALLOWED_PATHS:
+        base = str(base)
+
+        for root, dirs, files in os.walk(base):
+            for file in files:
+                if keyword.lower() in file.lower():
+                    results.append(os.path.join(root, file))
+
+    return {
+        "keyword": keyword,
+        "matches": results[:100],
+        "searched_paths": [str(p) for p in ALLOWED_PATHS]
+    }
+
+@mcp.tool()
+def search_in_files(path: str, keyword: str, max_results: int = 100) -> dict:
+    """
+    Mencari teks di dalam file (isi file), bukan hanya nama file.
+
+    Args:
+        path: Path folder untuk memulai pencarian (bisa root project)
+        keyword: Teks yang dicari di dalam file
+        max_results: Jumlah maksimal hasil yang dikembalikan (default: 100)
+
+    Returns:
+        Dictionary berisi:
+        - matches: List path file yang mengandung keyword
+        - total: Total file yang diperiksa
+
+    Notes:
+        - Recursive search di semua subfolder
+        - Hanya mencari file teks (.py, .txt, .json, dll)
+        - Path harus dalam whitelist
+    """
+    import os
+    from pathlib import Path
+
+    if not is_path_allowed(path):
+        return {"error": "Access denied"}
+
+    matches = []
+    count = 0
+
+    for root, dirs, files in os.walk(path):
+        for file in files:
+            # Skip file besar/binary
+            if file.endswith(('.png', '.jpg', '.jpeg', '.gif', '.mp4', '.exe', '.dll', '.bin', '.iso')):
+                continue
+
+            full_path = os.path.join(root, file)
+            count += 1
+
+            try:
+                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+
+                if keyword.lower() in content.lower():
+                    matches.append(full_path)
+
+                if len(matches) >= max_results:
+                    return {
+                        "keyword": keyword,
+                        "matches": matches,
+                        "total_checked": count,
+                        "limit_reached": True
+                    }
+            except:
+                continue
+
+    return {
+        "keyword": keyword,
+        "matches": matches,
+        "total_checked": count
+    }
+
+
+@mcp.tool()
+def analyze_data_files(file_names: list[str]) -> dict:
+    """
+    AI Data Analyst Tool: mencari, membaca, menganalisis, dan merangkum data dari multiple file.
+
+    Workflow:
+    1. Cari file di ALLOWED_PATHS
+    2. Load file sesuai tipe
+    3. Profiling data (shape, kolom, statistik)
+    4. Basic insight generation
+
+    Args:
+        file_names: List nama file (contoh: ["data.csv", "report.pdf"])
+
+    Returns:
+        Dictionary berisi hasil analisis tiap file
+    """
+    import os
+    import pandas as pd
+
+    results = []
+
+    for name in file_names:
+        found_path = None
+
+        # 🔍 SEARCH FILE
+        for base in ALLOWED_PATHS:
+            for root, dirs, files in os.walk(base):
+                for f in files:
+                    if name.lower() in f.lower():
+                        found_path = os.path.join(root, f)
+                        break
+                if found_path:
+                    break
+            if found_path:
+                break
+
+        if not found_path:
+            results.append({"file": name, "error": "File not found"})
+            continue
+
+        ext = found_path.split(".")[-1].lower()
+
+        try:
+            # =========================
+            # 📊 TABULAR DATA (CSV/XLSX)
+            # =========================
+            if ext in ["csv", "xlsx"]:
+                df = pd.read_excel(found_path) if ext == "xlsx" else pd.read_csv(found_path)
+
+                profile = {
+                    "shape": df.shape,
+                    "columns": df.columns.tolist(),
+                    "dtypes": df.dtypes.astype(str).to_dict(),
+                    "missing_values": df.isnull().sum().to_dict(),
+                    "sample": df.head(5).to_dict(),
+                }
+
+                # numeric summary
+                numeric_summary = df.describe().to_dict() if not df.empty else {}
+
+                insight = f"""
+                Dataset memiliki {df.shape[0]} baris dan {df.shape[1]} kolom.
+                Kolom utama: {', '.join(df.columns[:5])}
+                """
+
+                results.append({
+                    "file": name,
+                    "path": found_path,
+                    "type": ext,
+                    "profile": profile,
+                    "summary_stats": numeric_summary,
+                    "insight": insight.strip()
+                })
+
+            # =========================
+            # 📄 PDF
+            # =========================
+            elif ext == "pdf":
+                pdf_data = read_pdf(found_path)
+
+                text_preview = ""
+                if pdf_data.get("success"):
+                    content = pdf_data.get("content", {})
+                    text_preview = " ".join(list(content.values())[:2])[:2000]
+
+                results.append({
+                    "file": name,
+                    "type": "pdf",
+                    "path": found_path,
+                    "preview": text_preview,
+                    "note": "Gunakan AI untuk summarization lanjutan"
+                })
+
+            # =========================
+            # 📄 TEXT BASED
+            # =========================
+            elif ext in ["txt", "json", "py"]:
+                text_data = read_text_file(found_path)
+
+                results.append({
+                    "file": name,
+                    "type": ext,
+                    "path": found_path,
+                    "preview": text_data.get("content", "")[:2000]
+                })
+
+            else:
+                results.append({
+                    "file": name,
+                    "type": ext,
+                    "path": found_path,
+                    "error": "Unsupported file type"
+                })
+
+        except Exception as e:
+            results.append({
+                "file": name,
+                "path": found_path,
+                "error": str(e)
+            })
+
+    return {
+        "total_files": len(file_names),
+        "results": results
+    }
+
+@mcp.tool()
+def compare_datasets(file_names: list[str]) -> dict:
+    """
+    Membandingkan struktur dan statistik beberapa dataset.
+    """
+    import pandas as pd
+    import os
+
+    comparisons = []
+
+    for name in file_names:
+        for base in ALLOWED_PATHS:
+            for root, _, files in os.walk(base):
+                for f in files:
+                    if name.lower() in f.lower():
+                        path = os.path.join(root, f)
+                        if f.endswith(".csv"):
+                            df = pd.read_csv(path)
+                        elif f.endswith(".xlsx"):
+                            df = pd.read_excel(path)
+                        else:
+                            continue
+
+                        comparisons.append({
+                            "file": name,
+                            "columns": df.columns.tolist(),
+                            "shape": df.shape
+                        })
+
+    return {"comparisons": comparisons}
+
+@mcp.tool()
+def generate_data_summary(data: dict) -> str:
+    """
+    Mengubah hasil analisis menjadi narasi insight.
+    """
+    summaries = []
+
+    for item in data.get("results", []):
+        if "profile" in item:
+            shape = item["profile"]["shape"]
+            summaries.append(
+                f"File {item['file']} memiliki {shape[0]} baris dan {shape[1]} kolom."
+            )
+
+    return "\n".join(summaries)
+
+
 # Allow direct execution of the server
 if __name__ == "__main__":
     print("Running MCP server...")
